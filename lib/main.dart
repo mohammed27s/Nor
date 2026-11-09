@@ -25,6 +25,8 @@ class Q {
   String id, text, type, section;
   List<String> options;
   bool required;
+  String? followUpLabel;
+  String? followUpTrigger;
   Q({
     required this.id,
     required this.text,
@@ -32,6 +34,8 @@ class Q {
     this.section = 'q',
     List<String>? options,
     this.required = false,
+    this.followUpLabel,
+    this.followUpTrigger,
   }) : options = options ?? [];
 
   Map<String, dynamic> toJson() => {
@@ -41,6 +45,8 @@ class Q {
         'section': section,
         'options': options,
         'required': required,
+        'followUpLabel': followUpLabel,
+        'followUpTrigger': followUpTrigger,
       };
 
   factory Q.fromJson(Map m) => Q(
@@ -50,6 +56,8 @@ class Q {
         section: m['section'] ?? 'q',
         options: List<String>.from(m['options'] ?? []),
         required: m['required'] ?? false,
+        followUpLabel: m['followUpLabel'],
+        followUpTrigger: m['followUpTrigger'],
       );
 }
 
@@ -112,8 +120,8 @@ class Store extends ChangeNotifier {
         Q(id: 'q5', text: 'في حال كثرة ضغط العمل وانشغالك بالعينات، إلى أي مدى تضطر للاستمرار في ارتداء نفس القفازات لفترات طويلة؟', type: 'single', options: ['دائماً', 'غالباً', 'نادراً', 'أبداً']),
         Q(id: 'q6', text: 'هل تفرض مؤسستكم سياسة واضحة تحدد الحد الأقصى لزمن ارتداء زوج القفازات الواحد؟', type: 'single', options: ['نعم، توجد سياسة صارمة ومعلنة', 'نعم، ولكنها غير مطبقة بجدية', 'لا توجد سياسة واضحة بهذا الشأن', 'لا أعلم']),
         Q(id: 'q7', text: 'من خلال خبرتك، ما هي أبرز الأسباب التي تجعل الممارسين يتجنبون تغيير القفازات بشكل متكرر؟', type: 'multi', options: ['ضغط العمل الشديد والسرعة المطلوبة في إنجاز العينات', 'الرغبة في توفير واستهلاك مواد المختبر', 'الكسل أو عدم الإدراك الكافي بمخاطر التلوث المتقاطع', 'صعوبة أو كثرة إزالة وارتداء القفازات']),
-        Q(id: 'q8', text: 'هل سجلت في دورات مكافحة العدوى؟', type: 'single', options: ['نعم', 'لا']),
-        Q(id: 'q9', text: 'هل تعرف اليوم العالمي لنظافة اليدين؟', type: 'single', options: ['نعم، متى؟', 'لا']),
+        Q(id: 'q8', text: 'هل سجلت في دورات مكافحة العدوى؟', type: 'single', options: ['نعم', 'لا'], followUpTrigger: 'نعم', followUpLabel: 'اذكر اسم الدورة أو الجهة إن أمكن'),
+        Q(id: 'q9', text: 'هل تعرف اليوم العالمي لنظافة اليدين؟', type: 'single', options: ['نعم', 'لا'], followUpTrigger: 'نعم', followUpLabel: 'اذكر التاريخ أو ما تعرفه عنه'),
         Q(id: 'q10', text: 'أدرك تماماً أن الاستمرار في ارتداء القفازات لأكثر من ساعتين بسبب تعرّق ورطوبة داخلية تحفز نمو البكتيريا.', type: 'single', options: ['موافق', 'محايد', 'غير موافق']),
         Q(id: 'q11', text: 'أعتقد أن السطح الخارجي للقفاز يصبح ناقلاً للملوثات والبكتيريا إذا لم يتم تغييره بشكل دوري أثناء العمل.', type: 'single', options: ['موافق', 'محايد', 'غير موافق']),
         Q(id: 'q12', text: 'أحياناً أقوم بلمس الأدوات الشخصية (الهاتف المحمول أو الأقلام) وأنا أرتدي نفس القفاز المخبري.', type: 'single', options: ['موافق', 'محايد', 'غير موافق']),
@@ -125,12 +133,14 @@ class Store extends ChangeNotifier {
   /// دمج بيانات مستوردة (أسئلة + أشخاص). يرجع عدد الأشخاص.
   int importJson(String s) {
     final m = jsonDecode(s) as Map;
-    for (final e in (m['q'] as List? ?? [])) {
+    final qItems = (m['q'] ?? m['questions'] ?? []) as List;
+    final pItems = (m['p'] ?? m['people'] ?? m['responses'] ?? []) as List;
+    for (final e in qItems) {
       final q = Q.fromJson(e);
       if (!qs.any((x) => x.id == q.id)) qs.add(q);
     }
     var n = 0;
-    for (final e in (m['p'] as List? ?? [])) {
+    for (final e in pItems) {
       final p = Person.fromJson(e);
       final i = people.indexWhere((x) => x.id == p.id);
       if (i >= 0) {
@@ -329,9 +339,17 @@ Future<void> shareExcel(List<Person> list, String name) =>
     shareBytes(name, buildExcel(list), 'تقرير الاستبيان');
 
 Future<void> shareJson(List<Person> list, String name) {
+  final questions = store.qs.map((e) => e.toJson()).toList();
+  final people = list.map((e) => e.toJson()).toList();
   final m = {
-    'q': store.qs.map((e) => e.toJson()).toList(),
-    'p': list.map((e) => e.toJson()).toList(),
+    'format': 'nor_labs_survey_backup',
+    'version': 2,
+    'app': 'استبيان مختبرات Nor',
+    'exportedAt': DateTime.now().toIso8601String(),
+    'q': questions,
+    'p': people,
+    'questions': questions,
+    'people': people,
   };
   return shareBytes(name, utf8.encode(jsonEncode(m)), 'بيانات استبيان');
 }
@@ -374,7 +392,27 @@ class App extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           useMaterial3: true,
-          colorSchemeSeed: const Color(0xFF1F4E78),
+          colorSchemeSeed: const Color(0xFF167D8D),
+          scaffoldBackgroundColor: const Color(0xFFF4F8FA),
+          appBarTheme: const AppBarTheme(
+            backgroundColor: Color(0xFF0E5A68),
+            foregroundColor: Colors.white,
+            centerTitle: false,
+            elevation: 0,
+          ),
+          cardTheme: CardTheme(
+            color: Colors.white,
+            elevation: 2,
+            margin: EdgeInsets.symmetric(vertical: 6),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(18))),
+          ),
+          inputDecorationTheme: InputDecorationTheme(
+            filled: true,
+            fillColor: Colors.white,
+            border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(14))),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(14)), borderSide: BorderSide(color: Color(0xFFD7E5E8))),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(14)), borderSide: BorderSide(color: Color(0xFF167D8D), width: 2)),
+          ),
         ),
         builder: (c, child) =>
             Directionality(textDirection: TextDirection.rtl, child: child!),
@@ -396,16 +434,23 @@ class _HomeState extends State<Home> {
       if (store.people.isEmpty) return snack(context, 'لا توجد بيانات للتصدير');
       await shareExcel(store.people, 'survey_${stamp()}.xlsx');
     } else if (v == 'backup') {
-      await shareJson(store.people, 'survey_backup_${stamp()}.json');
+      await shareJson(store.people, 'nor_labs_backup_${stamp()}.json');
     } else if (v == 'import') {
-      final r = await FilePicker.platform.pickFiles(type: FileType.any);
-      if (r == null || r.files.single.path == null) return;
+      final r = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['json'],
+        withData: true,
+      );
+      if (r == null) return;
       try {
-        final s = await File(r.files.single.path!).readAsString();
+        final f = r.files.single;
+        final bytes = f.bytes ?? (f.path == null ? null : await File(f.path!).readAsBytes());
+        if (bytes == null || bytes.isEmpty) throw const FormatException();
+        final s = utf8.decode(bytes);
         final n = store.importJson(s);
-        if (mounted) snack(context, 'تم استيراد $n شخص');
+        if (mounted) snack(context, 'تم استيراد $n سجل بنجاح');
       } catch (_) {
-        if (mounted) snack(context, 'الملف غير صالح');
+        if (mounted) snack(context, 'تعذر الاستيراد. اختر ملف JSON صادر من التطبيق.');
       }
     }
   }
@@ -417,7 +462,7 @@ class _HomeState extends State<Home> {
           appBar: AppBar(
             title: Text(tab == 0
                 ? 'استبيان مختبرات Nor - الأشخاص (${store.people.length})'
-                : 'إدارة الأسئلة'),
+                : tab == 1 ? 'إدارة الأسئلة' : 'الرسومات البيانية'),
             actions: [
               PopupMenuButton<String>(
                 onSelected: menu,
@@ -425,15 +470,19 @@ class _HomeState extends State<Home> {
                   PopupMenuItem(
                       value: 'excel', child: Text('تصدير Excel شامل')),
                   PopupMenuItem(
-                      value: 'backup', child: Text('مشاركة كل البيانات (ملف)')),
+                      value: 'backup', child: Text('نسخة احتياطية قابلة للاستيراد (JSON)')),
                   PopupMenuItem(
                       value: 'import', child: Text('استيراد بيانات')),
                 ],
               ),
             ],
           ),
-          body: tab == 0 ? const PeopleTab() : const QuestionsTab(),
-          floatingActionButton: FloatingActionButton.extended(
+          body: tab == 0
+              ? const PeopleTab()
+              : tab == 1 ? const QuestionsTab() : const ChartsTab(),
+          floatingActionButton: tab == 2 ? null : FloatingActionButton.extended(
+            backgroundColor: const Color(0xFF0E5A68),
+            foregroundColor: Colors.white,
             icon: const Icon(Icons.add),
             label: Text(tab == 0 ? 'شخص جديد' : 'سؤال جديد'),
             onPressed: () async {
@@ -458,6 +507,8 @@ class _HomeState extends State<Home> {
                   icon: Icon(Icons.people_alt_outlined), label: 'الأشخاص'),
               NavigationDestination(
                   icon: Icon(Icons.edit_note), label: 'الأسئلة'),
+              NavigationDestination(
+                  icon: Icon(Icons.bar_chart_rounded), label: 'الرسومات'),
             ],
           ),
         ),
@@ -546,15 +597,29 @@ class _PersonFormState extends State<PersonForm> {
   Widget field(Q q) {
     switch (q.type) {
       case 'single':
+        final selected = ans[q.id];
+        final followKey = '${q.id}__followup';
         return Column(children: [
           for (final o in q.options)
             RadioListTile<String>(
               dense: true,
               contentPadding: EdgeInsets.zero,
+              activeColor: const Color(0xFF167D8D),
               title: Text(o),
               value: o,
-              groupValue: ans[q.id],
+              groupValue: selected,
               onChanged: (v) => setState(() => ans[q.id] = v!),
+            ),
+          if (q.followUpTrigger != null && selected == q.followUpTrigger)
+            Padding(
+              padding: const EdgeInsets.only(top: 6, bottom: 8),
+              child: TextField(
+                controller: ctrl(Q(id: followKey, text: q.followUpLabel ?? 'تفاصيل إضافية')),
+                minLines: 1,
+                maxLines: 3,
+                decoration: InputDecoration(labelText: q.followUpLabel ?? 'تفاصيل إضافية', prefixIcon: const Icon(Icons.edit_note)),
+                onChanged: (v) => ans[followKey] = v,
+              ),
             ),
         ]);
       case 'multi':
@@ -622,6 +687,10 @@ class _PersonFormState extends State<PersonForm> {
       if (q.type == 'text' || q.type == 'number') {
         ans[q.id] = ctrls[q.id]?.text.trim() ?? ans[q.id] ?? '';
       }
+      if (q.followUpTrigger != null) {
+        final key = '${q.id}__followup';
+        ans[key] = ctrls[key]?.text.trim() ?? ans[key] ?? '';
+      }
     }
     final missing = store.qs
         .where((q) => q.required && (ans[q.id] ?? '').trim().isEmpty)
@@ -683,6 +752,79 @@ class _PersonFormState extends State<PersonForm> {
   }
 }
 
+// ───────────────────────── الرسومات البيانية ─────────────────────────
+class ChartsTab extends StatelessWidget {
+  const ChartsTab({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    if (store.people.isEmpty) {
+      return const Center(child: Text('أضف إجابات أولاً لعرض الرسومات البيانية.', textAlign: TextAlign.center));
+    }
+    final questions = store.qs.where((q) => q.type == 'single' || q.type == 'multi' || q.type == 'rating').toList();
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 90),
+      children: [
+        Card(
+          color: const Color(0xFFE4F3F3),
+          child: ListTile(
+            leading: const CircleAvatar(backgroundColor: Color(0xFF0E5A68), child: Icon(Icons.insights, color: Colors.white)),
+            title: const Text('ملخص الاستبيان', style: TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text('إجمالي السجلات: ${store.people.length} · اختر سؤالاً لعرض توزيعه'),
+          ),
+        ),
+        for (final q in questions) _ChartCard(q: q),
+      ],
+    );
+  }
+}
+
+class _ChartCard extends StatelessWidget {
+  final Q q;
+  const _ChartCard({required this.q});
+
+  @override
+  Widget build(BuildContext context) {
+    final options = q.type == 'rating' ? ['1', '2', '3', '4', '5'] : q.options;
+    final counts = <String, int>{for (final o in options) o: 0};
+    for (final p in store.people) {
+      final a = p.answers[q.id] ?? '';
+      if (q.type == 'multi') {
+        for (final value in a.split(sep).map((e) => e.trim())) {
+          if (counts.containsKey(value)) counts[value] = counts[value]! + 1;
+        }
+      } else if (counts.containsKey(a)) {
+        counts[a] = counts[a]! + 1;
+      }
+    }
+    final maxCount = counts.values.fold<int>(0, (m, v) => v > m ? v : m);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(q.text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          const SizedBox(height: 14),
+          for (final entry in counts.entries)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [Expanded(child: Text(entry.key)), Text('${entry.value}', style: const TextStyle(fontWeight: FontWeight.bold))]),
+                const SizedBox(height: 5),
+                LinearProgressIndicator(
+                  value: maxCount == 0 ? 0 : entry.value / maxCount,
+                  minHeight: 9,
+                  borderRadius: BorderRadius.circular(10),
+                  backgroundColor: const Color(0xFFE5EEF0),
+                  color: const Color(0xFF20A39E),
+                ),
+              ]),
+            ),
+        ]),
+      ),
+    );
+  }
+}
+
 // ───────────────────────── إدارة الأسئلة ─────────────────────────
 
 class QuestionsTab extends StatelessWidget {
@@ -740,7 +882,7 @@ class QEditor extends StatefulWidget {
 }
 
 class _QEditorState extends State<QEditor> {
-  late TextEditingController text, opts;
+  late TextEditingController text, opts, followLabel, followTrigger;
   late String type, section;
   late bool required;
 
@@ -750,6 +892,8 @@ class _QEditorState extends State<QEditor> {
     final q = widget.q;
     text = TextEditingController(text: q?.text ?? '');
     opts = TextEditingController(text: q?.options.join('\n') ?? '');
+    followLabel = TextEditingController(text: q?.followUpLabel ?? '');
+    followTrigger = TextEditingController(text: q?.followUpTrigger ?? 'نعم');
     type = q?.type ?? 'text';
     section = q?.section ?? 'q';
     required = q?.required ?? false;
@@ -773,6 +917,8 @@ class _QEditorState extends State<QEditor> {
         section: section,
         options: choice ? o : [],
         required: required,
+        followUpLabel: choice && type == 'single' && followLabel.text.trim().isNotEmpty ? followLabel.text.trim() : null,
+        followUpTrigger: choice && type == 'single' && followLabel.text.trim().isNotEmpty ? followTrigger.text.trim() : null,
       ),
     );
   }
@@ -834,6 +980,12 @@ class _QEditorState extends State<QEditor> {
               alignLabelWithHint: true,
             ),
           ),
+          if (type == 'single') ...[
+            const SizedBox(height: 12),
+            TextField(controller: followLabel, decoration: const InputDecoration(labelText: 'سؤال نصي يظهر بعد اختيار نعم (اختياري)')),
+            const SizedBox(height: 8),
+            TextField(controller: followTrigger, decoration: const InputDecoration(labelText: 'الإجابة التي تُظهر السؤال الإضافي', hintText: 'مثال: نعم')),
+          ],
         ],
       ]),
     );
