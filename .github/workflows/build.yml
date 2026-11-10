@@ -26,7 +26,7 @@ jobs:
         run: |
           flutter create --platforms=android --project-name nor_labs_survey --org com.norlabs.survey .
           rm -rf test
-          sed -i 's/android:label="[^"]*"/android:label="استبيان مختبرات Nor"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's/android:label="[^"]*"/android:label="استبيان نور"/' android/app/src/main/AndroidManifest.xml
 
       - run: flutter pub get
 

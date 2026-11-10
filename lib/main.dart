@@ -94,7 +94,8 @@ class Store extends ChangeNotifier {
     sp = await SharedPreferences.getInstance();
     final s = sp.getString('data');
     if (s == null) {
-      qs = defaultQs();
+      qs = [];
+      people = [];
     } else {
       final m = jsonDecode(s);
       qs = (m['q'] as List).map((e) => Q.fromJson(e)).toList();
@@ -130,28 +131,74 @@ class Store extends ChangeNotifier {
         Q(id: 'q15', text: 'يمنحني ارتداء القفازات لفترة طويلة شعوراً زائفاً بالأمان يجعلني أحياناً أغفل عن تطهير يدي بالمعقم الكحولي فور نزعها.', type: 'single', options: ['موافق', 'محايد', 'غير موافق']),
       ];
 
-  /// دمج بيانات مستوردة (أسئلة + أشخاص). يرجع عدد الأشخاص.
-  int importJson(String s) {
-    final m = jsonDecode(s) as Map;
-    final qItems = (m['q'] ?? m['questions'] ?? []) as List;
-    final pItems = (m['p'] ?? m['people'] ?? m['responses'] ?? []) as List;
-    for (final e in qItems) {
-      final q = Q.fromJson(e);
-      if (!qs.any((x) => x.id == q.id)) qs.add(q);
-    }
-    var n = 0;
-    for (final e in pItems) {
-      final p = Person.fromJson(e);
-      final i = people.indexWhere((x) => x.id == p.id);
-      if (i >= 0) {
-        people[i] = p;
-      } else {
-        people.add(p);
+  /// استيراد الأسئلة والإجابات من ملف Excel الموحد.
+  int importExcelBytes(List<int> bytes) {
+    final ex = Excel.decodeBytes(bytes);
+    final questionSheet = ex['الأسئلة'] ?? ex['Questions'];
+    final answerSheet = ex['الإجابات'] ?? ex['Responses'] ?? ex['البيانات'];
+    if (questionSheet != null) {
+      final rows = questionSheet.rows;
+      if (rows.isNotEmpty) {
+        final header = _rowTexts(rows.first);
+        final index = <String, int>{};
+        for (var i = 0; i < header.length; i++) index[header[i].trim()] = i;
+        final next = <Q>[];
+        for (final row in rows.skip(1)) {
+          final id = _excelText(_cellAt(row, index['id'] ?? 0));
+          final text = _excelText(_cellAt(row, index['text'] ?? 1));
+          if (id.isEmpty || text.isEmpty) continue;
+          final options = _excelText(_cellAt(row, index['options'] ?? 4))
+              .split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+          next.add(Q(
+            id: id,
+            text: text,
+            type: _excelText(_cellAt(row, index['type'] ?? 2)).isEmpty ? 'text' : _excelText(_cellAt(row, index['type'] ?? 2)),
+            section: _excelText(_cellAt(row, index['section'] ?? 3)).isEmpty ? 'q' : _excelText(_cellAt(row, index['section'] ?? 3)),
+            options: options,
+            required: _excelText(_cellAt(row, index['required'] ?? 5)).toLowerCase() == 'true' || _excelText(_cellAt(row, index['required'] ?? 5)) == 'نعم',
+            followUpLabel: _excelText(_cellAt(row, index['followUpLabel'] ?? 6)).trim().isEmpty ? null : _excelText(_cellAt(row, index['followUpLabel'] ?? 6)).trim(),
+            followUpTrigger: _excelText(_cellAt(row, index['followUpTrigger'] ?? 7)).trim().isEmpty ? null : _excelText(_cellAt(row, index['followUpTrigger'] ?? 7)).trim(),
+          ));
+        }
+        if (next.isNotEmpty) qs = next;
       }
-      n++;
+    }
+    var imported = 0;
+    if (answerSheet != null) {
+      final rows = answerSheet.rows;
+      if (rows.length >= 2) {
+        final ids = _rowTexts(rows.first);
+        for (final row in rows.skip(1)) {
+          final id = _excelText(_cellAt(row, ids.indexOf('id')));
+          if (id.isEmpty || id == 'id') continue;
+          final createdText = _excelText(_cellAt(row, ids.indexOf('created')));
+          final answers = <String, String>{};
+          for (var i = 0; i < ids.length; i++) {
+            if (i < 2 || ids[i].isEmpty) continue;
+            answers[ids[i]] = _excelText(_cellAt(row, i));
+          }
+          final person = Person(id: id, created: DateTime.tryParse(createdText) ?? DateTime.now(), answers: answers);
+          final existing = people.indexWhere((x) => x.id == id);
+          if (existing >= 0) people[existing] = person; else people.add(person);
+          imported++;
+        }
+      }
     }
     save();
-    return n;
+    return imported;
+  }
+
+  List<String> _rowTexts(List<Data?> row) => row.map(_excelText).toList();
+  Data? _cellAt(List<Data?> row, int index) => index >= 0 && index < row.length ? row[index] : null;
+  String _excelText(Data? cell) {
+    final v = cell?.value;
+    if (v == null) return '';
+    if (v is TextCellValue) return v.value.toString();
+    if (v is IntCellValue) return v.value.toString();
+    if (v is DoubleCellValue) return v.value.toString();
+    if (v is BoolCellValue) return v.value.toString();
+    if (v is DateTimeCellValue) return v.asDateTimeLocal().toIso8601String();
+    return v.toString();
   }
 }
 
@@ -190,139 +237,51 @@ List<int> buildExcel(List<Person> list) {
   final ex = Excel.createExcel();
   ex.rename('Sheet1', 'الإجابات');
   final qs = store.qs;
+  final head = CellStyle(bold: true, fontColorHex: ExcelColor.fromHexString('#FFFFFF'), backgroundColorHex: ExcelColor.fromHexString('#0E5A68'), horizontalAlign: HorizontalAlign.Center, verticalAlign: VerticalAlign.Center, textWrapping: TextWrapping.WrapText, leftBorder: thin(), rightBorder: thin(), topBorder: thin(), bottomBorder: thin());
+  final body = CellStyle(verticalAlign: VerticalAlign.Top, textWrapping: TextWrapping.WrapText, leftBorder: thin(), rightBorder: thin(), topBorder: thin(), bottomBorder: thin());
+  final alt = CellStyle(backgroundColorHex: ExcelColor.fromHexString('#E8F4F4'), verticalAlign: VerticalAlign.Top, textWrapping: TextWrapping.WrapText, leftBorder: thin(), rightBorder: thin(), topBorder: thin(), bottomBorder: thin());
+  final label = CellStyle(bold: true, backgroundColorHex: ExcelColor.fromHexString('#D8ECEE'), textWrapping: TextWrapping.WrapText, leftBorder: thin(), rightBorder: thin(), topBorder: thin(), bottomBorder: thin());
 
-  final head = CellStyle(
-    bold: true,
-    fontColorHex: ExcelColor.fromHexString('#FFFFFF'),
-    backgroundColorHex: ExcelColor.fromHexString('#1F4E78'),
-    horizontalAlign: HorizontalAlign.Center,
-    verticalAlign: VerticalAlign.Center,
-    textWrapping: TextWrapping.WrapText,
-    leftBorder: thin(),
-    rightBorder: thin(),
-    topBorder: thin(),
-    bottomBorder: thin(),
-  );
-  final body = CellStyle(
-    verticalAlign: VerticalAlign.Top,
-    textWrapping: TextWrapping.WrapText,
-    leftBorder: thin(),
-    rightBorder: thin(),
-    topBorder: thin(),
-    bottomBorder: thin(),
-  );
-  final alt = CellStyle(
-    backgroundColorHex: ExcelColor.fromHexString('#EAF1F8'),
-    verticalAlign: VerticalAlign.Top,
-    textWrapping: TextWrapping.WrapText,
-    leftBorder: thin(),
-    rightBorder: thin(),
-    topBorder: thin(),
-    bottomBorder: thin(),
-  );
-  final title = CellStyle(
-    bold: true,
-    fontSize: 13,
-    fontColorHex: ExcelColor.fromHexString('#FFFFFF'),
-    backgroundColorHex: ExcelColor.fromHexString('#2E75B6'),
-  );
-  final label = CellStyle(
-    bold: true,
-    backgroundColorHex: ExcelColor.fromHexString('#D9E2F3'),
-    textWrapping: TextWrapping.WrapText,
-    leftBorder: thin(),
-    rightBorder: thin(),
-    topBorder: thin(),
-    bottomBorder: thin(),
-  );
+  final qSheet = ex['الأسئلة'];
+  qSheet.isRTL = true;
+  final qHeaders = ['id', 'text', 'type', 'section', 'options', 'required', 'followUpLabel', 'followUpTrigger'];
+  for (var i = 0; i < qHeaders.length; i++) put(qSheet, i, 0, TextCellValue(qHeaders[i]), head);
+  for (var r = 0; r < qs.length; r++) {
+    final q = qs[r];
+    final values = [q.id, q.text, q.type, q.section, q.options.join('\n'), q.required ? 'true' : 'false', q.followUpLabel ?? '', q.followUpTrigger ?? ''];
+    for (var c = 0; c < values.length; c++) put(qSheet, c, r + 1, TextCellValue(values[c]), r.isEven ? body : alt);
+  }
+  final widths = [18, 55, 16, 16, 42, 12, 40, 20];
+  for (var i = 0; i < widths.length; i++) qSheet.setColumnWidth(i, widths[i].toDouble());
 
-  // ── الورقة 1: جدول كل الإجابات
   final s1 = ex['الإجابات'];
   s1.isRTL = true;
-  final heads = ['#', 'تاريخ الإدخال', ...qs.map((q) => q.text)];
+  final heads = ['id', 'created', ...qs.expand((q) => [q.id, if (q.followUpTrigger != null) '${q.id}__followup'])];
+  final labels = ['معرّف السجل', 'تاريخ الإدخال', ...qs.expand((q) => [q.text, if (q.followUpTrigger != null) '${q.followUpLabel ?? 'إجابة إضافية'} (${q.text})'])];
   for (var i = 0; i < heads.length; i++) {
     put(s1, i, 0, TextCellValue(heads[i]), head);
-    s1.setColumnWidth(i, i == 0 ? 5 : (i == 1 ? 19 : 26));
+    put(s1, i, 1, TextCellValue(labels[i]), label);
+    s1.setColumnWidth(i, i < 2 ? 22 : 30);
   }
   for (var r = 0; r < list.length; r++) {
-    final p = list[r];
+    final person = list[r];
     final st = r.isEven ? body : alt;
-    put(s1, 0, r + 1, IntCellValue(r + 1), st);
-    put(s1, 1, r + 1, TextCellValue(fmt(p.created)), st);
-    for (var c = 0; c < qs.length; c++) {
-      final a = p.answers[qs[c].id] ?? '';
-      put(s1, c + 2, r + 1, a.isEmpty ? TextCellValue('') : cv(qs[c], a), st);
-    }
-  }
-
-  // ── الورقة 2: تقرير لكل شخص
-  final s2 = ex['تقارير فردية'];
-  s2.isRTL = true;
-  s2.setColumnWidth(0, 38);
-  s2.setColumnWidth(1, 48);
-  var row = 0;
-  for (var i = 0; i < list.length; i++) {
-    final p = list[i];
-    put(s2, 0, row, TextCellValue('تقرير ${i + 1}: ${personName(p)}'), title);
-    put(s2, 1, row, TextCellValue(fmt(p.created)), title);
-    row++;
+    put(s1, 0, r + 2, TextCellValue(person.id), st);
+    put(s1, 1, r + 2, TextCellValue(person.created.toIso8601String()), st);
+    var c = 2;
     for (final q in qs) {
-      put(s2, 0, row, TextCellValue(q.text), label);
-      put(s2, 1, row, TextCellValue(disp(p.answers[q.id] ?? '')), body);
-      row++;
+      put(s1, c++, r + 2, TextCellValue(disp(person.answers[q.id] ?? '')), st);
+      if (q.followUpTrigger != null) put(s1, c++, r + 2, TextCellValue(person.answers['${q.id}__followup'] ?? ''), st);
     }
-    row++;
   }
-
-  // ── الورقة 3: ملخص
-  final s3 = ex['ملخص'];
-  s3.isRTL = true;
-  s3.setColumnWidth(0, 40);
-  s3.setColumnWidth(1, 14);
-  s3.setColumnWidth(2, 14);
-  put(s3, 0, 0, TextCellValue('عدد الأشخاص'), label);
-  put(s3, 1, 0, IntCellValue(list.length), body);
+  final s2 = ex['تقارير فردية']; s2.isRTL = true; s2.setColumnWidth(0, 38); s2.setColumnWidth(1, 48);
+  var row = 0;
+  for (var i = 0; i < list.length; i++) { final person = list[i]; put(s2, 0, row, TextCellValue('تقرير ${i + 1}: ${personName(person)}'), head); put(s2, 1, row, TextCellValue(fmt(person.created)), head); row++; for (final q in qs) { put(s2, 0, row, TextCellValue(q.text), label); put(s2, 1, row, TextCellValue(disp(person.answers[q.id] ?? '')), body); row++; if (q.followUpTrigger != null) { put(s2, 0, row, TextCellValue(q.followUpLabel ?? 'إجابة إضافية'), label); put(s2, 1, row, TextCellValue(disp(person.answers['${q.id}__followup'] ?? '')), body); row++; } } row++; }
+  final s3 = ex['ملخص']; s3.isRTL = true; s3.setColumnWidth(0, 40); s3.setColumnWidth(1, 14); s3.setColumnWidth(2, 14); put(s3, 0, 0, TextCellValue('عدد الأشخاص'), label); put(s3, 1, 0, IntCellValue(list.length), body);
   var r3 = 2;
-  for (final q in qs) {
-    final isChoice = q.type == 'single' || q.type == 'multi' || q.type == 'rating';
-    if (!isChoice && q.type != 'number') continue;
-    put(s3, 0, r3, TextCellValue(q.text), head);
-    put(s3, 1, r3, TextCellValue(q.type == 'number' ? 'المتوسط' : 'العدد'), head);
-    put(s3, 2, r3, TextCellValue(q.type == 'number' ? '' : 'النسبة'), head);
-    r3++;
-    if (q.type == 'number') {
-      final nums = list
-          .map((p) => double.tryParse(p.answers[q.id] ?? ''))
-          .whereType<double>()
-          .toList();
-      final avg =
-          nums.isEmpty ? 0.0 : nums.reduce((a, b) => a + b) / nums.length;
-      put(s3, 0, r3, TextCellValue('المتوسط (${nums.length} إجابة)'), body);
-      put(s3, 1, r3, DoubleCellValue(double.parse(avg.toStringAsFixed(2))), body);
-      put(s3, 2, r3, TextCellValue(''), body);
-      r3 += 2;
-      continue;
-    }
-    final opts = q.type == 'rating' ? ['1', '2', '3', '4', '5'] : q.options;
-    for (final o in opts) {
-      final c = list.where((p) {
-        final a = p.answers[q.id] ?? '';
-        return q.type == 'multi'
-            ? a.split(sep).map((e) => e.trim()).contains(o)
-            : a == o;
-      }).length;
-      final pct = list.isEmpty ? 0 : (c * 100 / list.length).round();
-      put(s3, 0, r3, TextCellValue(o), body);
-      put(s3, 1, r3, IntCellValue(c), body);
-      put(s3, 2, r3, TextCellValue('$pct%'), body);
-      r3++;
-    }
-    r3++;
-  }
-
+  for (final q in qs) { final isChoice = q.type == 'single' || q.type == 'multi' || q.type == 'rating'; if (!isChoice && q.type != 'number') continue; put(s3, 0, r3, TextCellValue(q.text), head); put(s3, 1, r3, TextCellValue(q.type == 'number' ? 'المتوسط' : 'العدد'), head); put(s3, 2, r3, TextCellValue(q.type == 'number' ? '' : 'النسبة'), head); r3++; final opts = q.type == 'rating' ? ['1', '2', '3', '4', '5'] : q.options; for (final o in opts) { final count = list.where((p) { final a = p.answers[q.id] ?? ''; return q.type == 'multi' ? a.split(sep).map((e) => e.trim()).contains(o) : a == o; }).length; put(s3, 0, r3, TextCellValue(o), body); put(s3, 1, r3, IntCellValue(count), body); put(s3, 2, r3, TextCellValue(list.isEmpty ? '0%' : '${(count * 100 / list.length).round()}%'), body); r3++; } r3++; }
   return ex.save()!;
 }
-
 Future<void> shareBytes(String name, List<int> bytes, String text) async {
   final d = await getTemporaryDirectory();
   final f = File('${d.path}/$name');
@@ -338,21 +297,6 @@ String stamp() {
 Future<void> shareExcel(List<Person> list, String name) =>
     shareBytes(name, buildExcel(list), 'تقرير الاستبيان');
 
-Future<void> shareJson(List<Person> list, String name) {
-  final questions = store.qs.map((e) => e.toJson()).toList();
-  final people = list.map((e) => e.toJson()).toList();
-  final m = {
-    'format': 'nor_labs_survey_backup',
-    'version': 2,
-    'app': 'استبيان مختبرات Nor',
-    'exportedAt': DateTime.now().toIso8601String(),
-    'q': questions,
-    'p': people,
-    'questions': questions,
-    'people': people,
-  };
-  return shareBytes(name, utf8.encode(jsonEncode(m)), 'بيانات استبيان');
-}
 
 // ───────────────────────── مساعدات واجهة ─────────────────────────
 
@@ -388,7 +332,7 @@ class App extends StatelessWidget {
   const App({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'استبيان مختبرات Nor',
+        title: 'استبيان نور',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           useMaterial3: true,
@@ -429,28 +373,39 @@ class Home extends StatefulWidget {
 class _HomeState extends State<Home> {
   int tab = 0;
 
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (store.sp.getBool('welcome_shown') != true && mounted) {
+        await showDialog<void>(context: context, barrierDismissible: false, builder: (context) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          title: const Row(children: [Icon(Icons.auto_awesome, color: Color(0xFF167D8D)), SizedBox(width: 8), Text('أهلاً بكم في نور')]),
+          content: const Text('أهلاً بكم في تطبيق نور لعمل استبيان سريع\n\nابدأ باستيراد قالب الأسئلة Excel أو أنشئ أسئلتك من داخل التطبيق.', style: TextStyle(height: 1.7)),
+          actions: [FilledButton(onPressed: () => Navigator.pop(context), child: const Text('ابدأ الآن'))],
+        ));
+        await store.sp.setBool('welcome_shown', true);
+      }
+    });
+  }
+
   Future<void> menu(String v) async {
     if (v == 'excel') {
       if (store.people.isEmpty) return snack(context, 'لا توجد بيانات للتصدير');
       await shareExcel(store.people, 'survey_${stamp()}.xlsx');
     } else if (v == 'backup') {
-      await shareJson(store.people, 'nor_labs_backup_${stamp()}.json');
+      await shareExcel(store.people, 'nor_labs_backup_${stamp()}.xlsx');
     } else if (v == 'import') {
-      final r = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['json'],
-        withData: true,
-      );
+      final r = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['xlsx'], withData: true);
       if (r == null) return;
       try {
         final f = r.files.single;
         final bytes = f.bytes ?? (f.path == null ? null : await File(f.path!).readAsBytes());
         if (bytes == null || bytes.isEmpty) throw const FormatException();
-        final s = utf8.decode(bytes);
-        final n = store.importJson(s);
-        if (mounted) snack(context, 'تم استيراد $n سجل بنجاح');
+        final n = store.importExcelBytes(bytes);
+        if (mounted) snack(context, 'تم استيراد الملف Excel بنجاح ($n سجل)');
       } catch (_) {
-        if (mounted) snack(context, 'تعذر الاستيراد. اختر ملف JSON صادر من التطبيق.');
+        if (mounted) snack(context, 'تعذر الاستيراد. اختر قالب Excel صادرًا من التطبيق أو قالب الأسئلة.');
       }
     }
   }
@@ -461,7 +416,7 @@ class _HomeState extends State<Home> {
         builder: (c, _) => Scaffold(
           appBar: AppBar(
             title: Text(tab == 0
-                ? 'استبيان مختبرات Nor - الأشخاص (${store.people.length})'
+                ? 'استبيان نور - الأشخاص (${store.people.length})'
                 : tab == 1 ? 'إدارة الأسئلة' : 'الرسومات البيانية'),
             actions: [
               PopupMenuButton<String>(
@@ -470,9 +425,9 @@ class _HomeState extends State<Home> {
                   PopupMenuItem(
                       value: 'excel', child: Text('تصدير Excel شامل')),
                   PopupMenuItem(
-                      value: 'backup', child: Text('نسخة احتياطية قابلة للاستيراد (JSON)')),
+                      value: 'backup', child: Text('تصدير Excel قابل للاستيراد')),
                   PopupMenuItem(
-                      value: 'import', child: Text('استيراد بيانات')),
+                      value: 'import', child: Text('استيراد Excel')),
                 ],
               ),
             ],
@@ -543,7 +498,7 @@ class PeopleTab extends StatelessWidget {
                 if (v == 'xlsx') {
                   await shareExcel([p], 'report_${p.id}.xlsx');
                 } else if (v == 'json') {
-                  await shareJson([p], 'person_${p.id}.json');
+                  await shareExcel([p], 'person_${p.id}.xlsx');
                 } else if (v == 'del') {
                   if (await confirm(c, 'حذف بيانات ${personName(p)}؟')) {
                     store.people.remove(p);
@@ -552,7 +507,7 @@ class PeopleTab extends StatelessWidget {
                 }
               },
               itemBuilder: (_) => const [
-                PopupMenuItem(value: 'json', child: Text('مشاركة لمستخدم آخر')),
+                PopupMenuItem(value: 'json', child: Text('مشاركة Excel')),
                 PopupMenuItem(value: 'xlsx', child: Text('تقرير Excel')),
                 PopupMenuItem(value: 'del', child: Text('حذف')),
               ],
@@ -594,6 +549,14 @@ class _PersonFormState extends State<PersonForm> {
   TextEditingController ctrl(Q q) =>
       ctrls.putIfAbsent(q.id, () => TextEditingController(text: ans[q.id] ?? ''));
 
+  void setAnswer(String key, String value) {
+    setState(() => ans[key] = value);
+    if (widget.person != null) {
+      widget.person!.answers = ans;
+      store.save();
+    }
+  }
+
   Widget field(Q q) {
     switch (q.type) {
       case 'single':
@@ -608,7 +571,7 @@ class _PersonFormState extends State<PersonForm> {
               title: Text(o),
               value: o,
               groupValue: selected,
-              onChanged: (v) => setState(() => ans[q.id] = v!),
+              onChanged: (v) => setAnswer(q.id, v!),
             ),
           if (q.followUpTrigger != null && selected == q.followUpTrigger)
             Padding(
@@ -618,7 +581,7 @@ class _PersonFormState extends State<PersonForm> {
                 minLines: 1,
                 maxLines: 3,
                 decoration: InputDecoration(labelText: q.followUpLabel ?? 'تفاصيل إضافية', prefixIcon: const Icon(Icons.edit_note)),
-                onChanged: (v) => ans[followKey] = v,
+                onChanged: (v) => setAnswer(followKey, v),
               ),
             ),
         ]);
@@ -753,27 +716,68 @@ class _PersonFormState extends State<PersonForm> {
 }
 
 // ───────────────────────── الرسومات البيانية ─────────────────────────
-class ChartsTab extends StatelessWidget {
+class ChartsTab extends StatefulWidget {
   const ChartsTab({super.key});
+  @override
+  State<ChartsTab> createState() => _ChartsTabState();
+}
+
+class _ChartsTabState extends State<ChartsTab> {
+  String style = 'bars';
+  String first = '';
+  String second = '';
+
+  List<Q> get questions => store.qs.where((q) => q.type == 'single' || q.type == 'multi' || q.type == 'rating').toList();
+
+  @override
+  void initState() {
+    super.initState();
+    final savedStyle = store.sp.getString('chart_style');
+    final savedFirst = store.sp.getString('chart_first');
+    final savedSecond = store.sp.getString('chart_second');
+    if (savedStyle != null) style = savedStyle;
+    if (savedFirst != null) first = savedFirst;
+    if (savedSecond != null) second = savedSecond;
+  }
+
+  Future<void> saveView() async {
+    await store.sp.setString('chart_style', style);
+    await store.sp.setString('chart_first', first);
+    await store.sp.setString('chart_second', second);
+    if (mounted) snack(context, 'تم حفظ شكل الرسومات والمقارنة على الجهاز');
+  }
 
   @override
   Widget build(BuildContext context) {
     if (store.people.isEmpty) {
       return const Center(child: Text('أضف إجابات أولاً لعرض الرسومات البيانية.', textAlign: TextAlign.center));
     }
-    final questions = store.qs.where((q) => q.type == 'single' || q.type == 'multi' || q.type == 'rating').toList();
+    final validIds = questions.map((q) => q.id).toSet();
+    if (!validIds.contains(first)) first = questions.isNotEmpty ? questions.first.id : '';
+    if (!validIds.contains(second)) second = questions.length > 1 ? questions[1].id : '';
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 90),
       children: [
-        Card(
-          color: const Color(0xFFE4F3F3),
-          child: ListTile(
-            leading: const CircleAvatar(backgroundColor: Color(0xFF0E5A68), child: Icon(Icons.insights, color: Colors.white)),
-            title: const Text('ملخص الاستبيان', style: TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Text('إجمالي السجلات: ${store.people.length} · اختر سؤالاً لعرض توزيعه'),
-          ),
-        ),
-        for (final q in questions) _ChartCard(q: q),
+        Card(color: const Color(0xFFE4F3F3), child: ListTile(leading: const CircleAvatar(backgroundColor: Color(0xFF0E5A68), child: Icon(Icons.insights, color: Colors.white)), title: const Text('ملخص الاستبيان', style: TextStyle(fontWeight: FontWeight.bold)), subtitle: Text('إجمالي السجلات: ${store.people.length} · تحكم في شكل العرض والمقارنة'))),
+        Card(child: Padding(padding: const EdgeInsets.all(14), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('إعدادات العرض', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(value: style, decoration: const InputDecoration(labelText: 'شكل الرسم'), items: const [DropdownMenuItem(value: 'bars', child: Text('أشرطة ومؤشرات')), DropdownMenuItem(value: 'percent', child: Text('نسب مئوية')), DropdownMenuItem(value: 'numbers', child: Text('بطاقات أرقام'))], onChanged: (v) => setState(() => style = v ?? 'bars')),
+          const SizedBox(height: 10),
+          FilledButton.icon(onPressed: saveView, icon: const Icon(Icons.bookmark_outline), label: const Text('حفظ الشكل محليًا')),
+        ]))),
+        Card(child: Padding(padding: const EdgeInsets.all(14), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('مقارنة يدوية بين سؤالين', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(value: first.isEmpty ? null : first, decoration: const InputDecoration(labelText: 'السؤال الأول'), items: questions.map((q) => DropdownMenuItem(value: q.id, child: Text(q.text, overflow: TextOverflow.ellipsis))).toList(), onChanged: (v) => setState(() => first = v ?? '')),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(value: second.isEmpty ? null : second, decoration: const InputDecoration(labelText: 'السؤال الثاني'), items: questions.map((q) => DropdownMenuItem(value: q.id, child: Text(q.text, overflow: TextOverflow.ellipsis))).toList(), onChanged: (v) => setState(() => second = v ?? '')),
+          if (first.isNotEmpty && second.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _ComparisonCard(first: questions.firstWhere((q) => q.id == first), second: questions.firstWhere((q) => q.id == second)),
+          ],
+        ]))),
+        for (final q in questions) _ChartCard(q: q, style: style),
       ],
     );
   }
@@ -781,47 +785,65 @@ class ChartsTab extends StatelessWidget {
 
 class _ChartCard extends StatelessWidget {
   final Q q;
-  const _ChartCard({required this.q});
+  final String style;
+  const _ChartCard({required this.q, required this.style});
 
-  @override
-  Widget build(BuildContext context) {
+  Map<String, int> counts() {
     final options = q.type == 'rating' ? ['1', '2', '3', '4', '5'] : q.options;
-    final counts = <String, int>{for (final o in options) o: 0};
+    final result = <String, int>{for (final o in options) o: 0};
     for (final p in store.people) {
       final a = p.answers[q.id] ?? '';
       if (q.type == 'multi') {
-        for (final value in a.split(sep).map((e) => e.trim())) {
-          if (counts.containsKey(value)) counts[value] = counts[value]! + 1;
-        }
-      } else if (counts.containsKey(a)) {
-        counts[a] = counts[a]! + 1;
-      }
+        for (final value in a.split(sep).map((e) => e.trim())) if (result.containsKey(value)) result[value] = result[value]! + 1;
+      } else if (result.containsKey(a)) result[a] = result[a]! + 1;
     }
-    final maxCount = counts.values.fold<int>(0, (m, v) => v > m ? v : m);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(q.text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-          const SizedBox(height: 14),
-          for (final entry in counts.entries)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [Expanded(child: Text(entry.key)), Text('${entry.value}', style: const TextStyle(fontWeight: FontWeight.bold))]),
-                const SizedBox(height: 5),
-                LinearProgressIndicator(
-                  value: maxCount == 0 ? 0 : entry.value / maxCount,
-                  minHeight: 9,
-                  borderRadius: BorderRadius.circular(10),
-                  backgroundColor: const Color(0xFFE5EEF0),
-                  color: const Color(0xFF20A39E),
-                ),
-              ]),
-            ),
-        ]),
-      ),
-    );
+    return result;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final data = counts();
+    final total = store.people.length;
+    final maxCount = data.values.fold<int>(0, (m, v) => v > m ? v : m);
+    return Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(q.text, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+      const SizedBox(height: 14),
+      for (final entry in data.entries) Padding(padding: const EdgeInsets.only(bottom: 12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [Expanded(child: Text(entry.key)), Text(style == 'percent' ? '${total == 0 ? 0 : (entry.value * 100 / total).round()}%' : '${entry.value}', style: const TextStyle(fontWeight: FontWeight.bold))]),
+        if (style == 'bars') ...[const SizedBox(height: 5), LinearProgressIndicator(value: maxCount == 0 ? 0 : entry.value / maxCount, minHeight: 9, borderRadius: BorderRadius.circular(10), backgroundColor: const Color(0xFFE5EEF0), color: const Color(0xFF20A39E))],
+        if (style == 'percent') ...[const SizedBox(height: 5), LinearProgressIndicator(value: total == 0 ? 0 : entry.value / total, minHeight: 9, borderRadius: BorderRadius.circular(10), backgroundColor: const Color(0xFFE5EEF0), color: const Color(0xFF167D8D))],
+      ])),
+    ])));
+  }
+}
+
+class _ComparisonCard extends StatelessWidget {
+  final Q first;
+  final Q second;
+  const _ComparisonCard({required this.first, required this.second});
+  @override
+  Widget build(BuildContext context) => Column(children: [
+    _ComparisonQuestion(q: first),
+    const Divider(height: 24),
+    _ComparisonQuestion(q: second),
+  ]);
+}
+
+class _ComparisonQuestion extends StatelessWidget {
+  final Q q;
+  const _ComparisonQuestion({required this.q});
+  @override
+  Widget build(BuildContext context) {
+    final options = q.type == 'rating' ? ['1', '2', '3', '4', '5'] : q.options;
+    final total = store.people.length;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(q.text, style: const TextStyle(fontWeight: FontWeight.w600)),
+      const SizedBox(height: 8),
+      Wrap(spacing: 8, runSpacing: 8, children: [for (final option in options) Builder(builder: (_) {
+        final count = store.people.where((p) { final a = p.answers[q.id] ?? ''; return q.type == 'multi' ? a.split(sep).map((e) => e.trim()).contains(option) : a == option; }).length;
+        return Chip(avatar: CircleAvatar(child: Text('$count')), label: Text('$option · ${total == 0 ? 0 : (count * 100 / total).round()}%'));
+      })]),
+    ]);
   }
 }
 
